@@ -1,0 +1,8 @@
+venv/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+feedback_log.json
+ground_truth.json
+rights_log.json
