@@ -1,16 +1,20 @@
 import os
+import re
 import json
 import time
 import math
+import html as html_mod
 import base64
 import tempfile
 import pandas as pd
 from datetime import datetime, date
 import streamlit as st
 import streamlit.components.v1 as components
+from dotenv import load_dotenv
 from twelvelabs import TwelveLabs
 
-client = TwelveLabs(api_key=os.environ["TWELVELABS_API_KEY"])
+load_dotenv()
+client = TwelveLabs(api_key=os.environ.get("TWELVELABS_API_KEY", ""))
 
 # ── PREDEFINED COMPLIANCE RULESETS ───────────────────────────
 RULESETS = {
@@ -80,7 +84,6 @@ AUDIO_FLAGS = [
 
 # ── HELPERS ──────────────────────────────────────────────────
 def parse_findings(report):
-    import re
     findings = []
     lines = report.split("\n")
     i = 0
@@ -131,7 +134,6 @@ def severity_score(report):
     return score
 
 def parse_timestamp_seconds(finding):
-    import re
     try:
         match = re.search(r'\[(\d+):(\d+)', finding)
         if match:
@@ -349,10 +351,11 @@ def video_player(video_url: str, seek_to: float = 0, findings: list = None):
             ts = parse_timestamp_seconds(f)
             severity = "CRITICAL" if "CRITICAL" in f else "MAJOR" if "MAJOR" in f else "MINOR"
             color = "#ff3232" if severity == "CRITICAL" else "#ff69b4" if severity == "MAJOR" else "#ffdfba"
-            markers_js += f'addMarker({ts}, "{color}", "{f[:60].replace(chr(34), "")}");'
+            safe_label = html_mod.escape(f[:60]).replace("\\", "\\\\").replace("'", "\\'").replace('"', '\\"').replace("\n", " ")
+            markers_js += f'addMarker({ts}, "{color}", "{safe_label}");'
 
     findings_data = json.dumps([
-        (parse_timestamp_seconds(f), f[:50],
+        (parse_timestamp_seconds(f), html_mod.escape(f[:50]),
          "critical" if "CRITICAL" in f else "major" if "MAJOR" in f else "minor")
         for f in (findings or [])
     ])
@@ -933,13 +936,23 @@ with st.sidebar:
     video_source = st.radio("source", ["Select from TwelveLabs", "Upload video"], label_visibility="collapsed")
 
     if video_source == "Upload video":
-        st.file_uploader("upload video", type=["mp4", "mov", "avi", "webm"], label_visibility="collapsed")
-        st.caption(f"using: {DEMO_VIDEO_LABEL}")
+        uploaded_file = st.file_uploader("upload video", type=["mp4", "mov", "avi", "webm"], label_visibility="collapsed")
+        if uploaded_file is not None:
+            st.caption(f"uploaded: {uploaded_file.name}")
+            st.info("Upload processing not yet available — using demo video")
+        else:
+            st.caption(f"using: {DEMO_VIDEO_LABEL}")
     else:
         st.caption(f"✦ {DEMO_VIDEO_LABEL}")
 
     selected_video_id = DEMO_VIDEO_ID
     selected_video_label = DEMO_VIDEO_LABEL
+
+    st.markdown("### ✦ Ruleset")
+    ruleset_name = st.selectbox("ruleset", list(RULESETS.keys()), label_visibility="collapsed")
+    custom_rules = ""
+    if ruleset_name == "Custom":
+        custom_rules = st.text_area("custom rules (one per line)", height=100, label_visibility="collapsed", placeholder="e.g.\nNo visible tattoos\nNo competitor products")
 
     st.markdown("### ✦ Platforms")
     selected_platforms = st.multiselect("platforms", PLATFORMS, default=[], label_visibility="collapsed")
@@ -947,12 +960,11 @@ with st.sidebar:
     st.markdown("### ✦ Jurisdictions")
     selected_jurisdictions = st.multiselect("jurisdictions", list(JURISDICTIONS.keys()), default=[], label_visibility="collapsed")
 
+    st.markdown("### ✦ Audio Flags")
+    selected_audio = st.multiselect("audio flags", AUDIO_FLAGS, default=AUDIO_FLAGS, label_visibility="collapsed")
 
-# ── HARDCODED CONFIG ──────────────────────────────────────────
-ruleset_name = "Broadcast Standards"
-custom_rules = ""
-include_rights = True
-selected_audio = AUDIO_FLAGS
+    st.markdown("### ✦ Options")
+    include_rights = st.checkbox("Include rights & clearances scan", value=True)
 
 # ── THEATER PLAYER ────────────────────────────────────────────
 _tv_url = fetch_video_url(DEMO_VIDEO_ID, DEMO_INDEX_ID)
@@ -998,18 +1010,22 @@ if run:
 <style>@keyframes cleared-spin {{ to {{ transform: rotate(360deg); }} }}</style>
 """, unsafe_allow_html=True)
         prompt = build_prompt(ruleset_name, custom_rules, selected_platforms, selected_jurisdictions, selected_audio, include_rights)
-        response = client.analyze(video_id=selected_video_id, prompt=prompt)
-        st.session_state.report = response.data
-        st.session_state.findings = parse_findings(response.data)
-        st.session_state.video_id = selected_video_id
-        st.session_state.video_label = selected_video_label
-        st.session_state.risk_score = severity_score(response.data)
-        st.session_state.platforms = selected_platforms
-        st.session_state.jurisdictions = selected_jurisdictions
-        st.session_state.ruleset = ruleset_name
-        st.session_state.run_time = datetime.now().isoformat()
-        st.session_state.seek_to = 0
-        _overlay_ph.empty()
+        try:
+            response = client.analyze(video_id=selected_video_id, prompt=prompt)
+            st.session_state.report = response.data
+            st.session_state.findings = parse_findings(response.data)
+            st.session_state.video_id = selected_video_id
+            st.session_state.video_label = selected_video_label
+            st.session_state.risk_score = severity_score(response.data)
+            st.session_state.platforms = selected_platforms
+            st.session_state.jurisdictions = selected_jurisdictions
+            st.session_state.ruleset = ruleset_name
+            st.session_state.run_time = datetime.now().isoformat()
+            st.session_state.seek_to = 0
+        except Exception as e:
+            st.error(f"Analysis failed: {e}")
+        finally:
+            _overlay_ph.empty()
 
 # ── RESULTS ───────────────────────────────────────────────────
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
@@ -1023,13 +1039,13 @@ with tab1:
     else:
         score = st.session_state.risk_score
         if score >= 20:
-            st.markdown(f'<div class="risk-critical">⛔ critical risk · score {score} / 30 · immediate action required</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="risk-critical">⛔ critical risk · score {score} · immediate action required</div>', unsafe_allow_html=True)
         elif score >= 15:
-            st.markdown(f'<div class="risk-high">⚠ high risk · score {score} / 30</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="risk-high">⚠ high risk · score {score}</div>', unsafe_allow_html=True)
         elif score >= 7:
-            st.markdown(f'<div class="risk-medium">⚡ medium risk · score {score} / 30</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="risk-medium">⚡ medium risk · score {score}</div>', unsafe_allow_html=True)
         else:
-            st.markdown(f'<div class="risk-low">✓ low risk · score {score} / 30</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="risk-low">✓ low risk · score {score}</div>', unsafe_allow_html=True)
         st.markdown(f"*{st.session_state.get('run_time','—')} · {st.session_state.get('ruleset','—')} · {st.session_state.get('video_label','')}*")
         st.markdown("---")
         st.markdown(st.session_state.report)
